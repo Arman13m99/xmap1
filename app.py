@@ -867,7 +867,12 @@ def get_map_data():
                 if not df_aggregated.empty and heatmap_type_req != "user_density":
                     max_count = df_aggregated['value'].max()
                     min_count = df_aggregated['value'].min()
-                    df_aggregated['value'] = ((df_aggregated['value'] - min_count) / (max_count - min_count)) * 100 if max_count > min_count else 50
+                    # Normalize values to a 0-1 range on the backend so the client
+                    # heatmap receives consistent weights. This avoids dramatic
+                    # visual jumps when adjusting radius or blur on the frontend.
+                    df_aggregated['value'] = (
+                        (df_aggregated['value'] - min_count) / (max_count - min_count)
+                    ) if max_count > min_count else 0.5
                 heatmap_data = df_aggregated.to_dict(orient='records')
         
         elif heatmap_type_req == "population" and city_name == "tehran":
