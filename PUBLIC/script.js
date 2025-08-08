@@ -581,10 +581,8 @@ document.addEventListener('DOMContentLoaded', () => {
         areaFillColorEl.addEventListener('input', restylePolygons);
         areaFillNoneEl.addEventListener('change', restylePolygons);
         vendorMarkerSizeEl.addEventListener('input', (e) => updateVendorIconSize(e.target.value));
-        heatmapRadiusEl.addEventListener('input', (e) => { heatmapRadiusValueEl.textContent = e.target.value; });
-        heatmapRadiusEl.addEventListener('change', () => { fetchAndDisplayMapData(); });
-        heatmapBlurEl.addEventListener('input', (e) => { heatmapBlurValueEl.textContent = e.target.value; });
-        heatmapBlurEl.addEventListener('change', () => { fetchAndDisplayMapData(); });
+        heatmapRadiusEl.addEventListener('input', (e) => { heatmapRadiusValueEl.textContent = e.target.value; renderCurrentHeatmap(); });
+        heatmapBlurEl.addEventListener('input', (e) => { heatmapBlurValueEl.textContent = e.target.value; renderCurrentHeatmap(); });
         heatmapMaxValEl.addEventListener('input', (e) => { heatmapMaxValValueEl.textContent = e.target.value; renderCurrentHeatmap(); });
     }
     
@@ -645,8 +643,6 @@ document.addEventListener('DOMContentLoaded', () => {
         params.append('vendor_visible', vendorVisibleEl.value);
         params.append('vendor_is_open', vendorIsOpenEl.value);
         params.append('heatmap_type_request', currentHeatmapType);
-        params.append('heatmap_radius', heatmapRadiusEl.value);
-        params.append('heatmap_blur', heatmapBlurEl.value);
         params.append('radius_modifier', currentRadiusModifier);
         params.append('radius_mode', currentRadiusMode);
         params.append('radius_fixed', currentRadiusFixed);
@@ -720,12 +716,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const heatPoints = lastHeatmapData.map(p => [p.lat, p.lng, p.value]);
         
         // Adjusted options for normalized data
-        let heatOptions = {
-            radius: 25,
-            blur: 15,
-            maxZoom: 18,
-            max: parseFloat(heatmapMaxValEl.value),
-            minOpacity: 0.3
+        let heatOptions = { 
+            radius: parseInt(heatmapRadiusEl.value), 
+            blur: parseInt(heatmapBlurEl.value), 
+            maxZoom: 18, 
+            max: parseFloat(heatmapMaxValEl.value), // Now works well with normalized 0-100 values
+            minOpacity: 0.3  // Add minimum opacity for better visibility
         };
         
         // Different gradients for different heatmap types

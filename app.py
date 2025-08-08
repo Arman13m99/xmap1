@@ -396,45 +396,8 @@ def aggregate_user_heatmap_points(df, lat_col, lng_col, user_col, precision=4):
             aggregated['value'] = ((aggregated['value'] - min_val) / (max_val - min_val)) * 100
         else:
             aggregated['value'] = 50
-
+    
     return aggregated[['lat', 'lng', 'value']]
-
-def generate_heatmap_grid(df, lat_col, lng_col, value_col, grid_size=50, sigma=1.0):
-    """Generate a smooth heatmap grid using Gaussian smoothing."""
-    if df.empty:
-        return pd.DataFrame(columns=['lat', 'lng', 'value'])
-
-    lat_vals = df[lat_col].to_numpy()
-    lng_vals = df[lng_col].to_numpy()
-    weights = df[value_col].to_numpy() if value_col in df.columns else np.ones(len(df))
-
-    lat_min, lat_max = lat_vals.min(), lat_vals.max()
-    lng_min, lng_max = lng_vals.min(), lng_vals.max()
-
-    heatmap, lat_edges, lng_edges = np.histogram2d(
-        lat_vals, lng_vals, bins=grid_size, weights=weights,
-        range=[[lat_min, lat_max], [lng_min, lng_max]]
-    )
-
-    if sigma > 0:
-        from scipy.ndimage import gaussian_filter
-        heatmap = gaussian_filter(heatmap, sigma=sigma, mode='constant')
-
-    max_val = heatmap.max()
-    if max_val > 0:
-        heatmap = (heatmap / max_val) * 100
-
-    lat_centers = (lat_edges[:-1] + lat_edges[1:]) / 2
-    lng_centers = (lng_edges[:-1] + lng_edges[1:]) / 2
-
-    records = []
-    for i, lat in enumerate(lat_centers):
-        for j, lng in enumerate(lng_centers):
-            val = heatmap[i, j]
-            if val > 0:
-                records.append({'lat': float(lat), 'lng': float(lng), 'value': float(val)})
-
-    return pd.DataFrame(records)
 
 def load_data():
     global df_orders, df_vendors, gdf_marketing_areas, gdf_tehran_region, gdf_tehran_main_districts, df_coverage_targets, target_lookup_dict
@@ -798,9 +761,6 @@ def get_map_data():
         heatmap_type_req = request.args.get('heatmap_type_request', default="none", type=str)
         area_type_display = request.args.get('area_type_display', default="tapsifood_marketing_areas", type=str)
         selected_polygon_sub_types = [s.strip() for s in request.args.getlist('area_sub_type_filter') if s.strip()]
-
-        heatmap_radius = request.args.get('heatmap_radius', default=25, type=int)
-        heatmap_blur = request.args.get('heatmap_blur', default=20, type=int)
         
         # New parameters for radius modifier
         radius_modifier = request.args.get('radius_modifier', default=1.0, type=float)
@@ -888,31 +848,27 @@ def get_map_data():
         if heatmap_type_req in ["order_density", "order_density_organic", "order_density_non_organic", "user_density"]:
             df_hm_source = df_orders_filtered.dropna(subset=['customer_latitude', 'customer_longitude'])
             if not df_hm_source.empty:
-                sigma = max(heatmap_radius / 10.0, 0.1)
-                grid_size = max(int(heatmap_blur), 10)
                 if heatmap_type_req == "order_density":
-                    df_hm_source['value'] = 1
-                    df_grid = generate_heatmap_grid(df_hm_source, 'customer_latitude', 'customer_longitude', 'value', grid_size=grid_size, sigma=sigma)
+                    df_hm_source['order_count'] = 1
+                    df_aggregated = aggregate_heatmap_points(df_hm_source, 'customer_latitude', 'customer_longitude', 'order_count', precision=4)
                 elif heatmap_type_req == "order_density_organic":
                     if 'organic' in df_hm_source.columns:
                         df_organic = df_hm_source[df_hm_source['organic'] == 1]
-                        df_grid = generate_heatmap_grid(df_organic.assign(value=1), 'customer_latitude', 'customer_longitude', 'value', grid_size=grid_size, sigma=sigma) if not df_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
-                    else:
-                        df_grid = pd.DataFrame(columns=['lat', 'lng', 'value'])
+                        df_aggregated = aggregate_heatmap_points(df_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', precision=4) if not df_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
+                    else: df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
                 elif heatmap_type_req == "order_density_non_organic":
                     if 'organic' in df_hm_source.columns:
                         df_non_organic = df_hm_source[df_hm_source['organic'] == 0]
-                        df_grid = generate_heatmap_grid(df_non_organic.assign(value=1), 'customer_latitude', 'customer_longitude', 'value', grid_size=grid_size, sigma=sigma) if not df_non_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
-                    else:
-                        df_grid = pd.DataFrame(columns=['lat', 'lng', 'value'])
+                        df_aggregated = aggregate_heatmap_points(df_non_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', precision=4) if not df_non_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
+                    else: df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
                 elif heatmap_type_req == "user_density":
-                    if 'user_id' in df_hm_source.columns:
-                        df_unique = df_hm_source.drop_duplicates(subset=['customer_latitude', 'customer_longitude', 'user_id'])
-                        df_unique['value'] = 1
-                        df_grid = generate_heatmap_grid(df_unique, 'customer_latitude', 'customer_longitude', 'value', grid_size=grid_size, sigma=sigma)
-                    else:
-                        df_grid = pd.DataFrame(columns=['lat', 'lng', 'value'])
-                heatmap_data = df_grid.to_dict(orient='records')
+                    df_aggregated = aggregate_user_heatmap_points(df_hm_source, 'customer_latitude', 'customer_longitude', 'user_id', precision=4) if 'user_id' in df_hm_source.columns else pd.DataFrame(columns=['lat', 'lng', 'value'])
+                
+                if not df_aggregated.empty and heatmap_type_req != "user_density":
+                    max_count = df_aggregated['value'].max()
+                    min_count = df_aggregated['value'].min()
+                    df_aggregated['value'] = ((df_aggregated['value'] - min_count) / (max_count - min_count)) * 100 if max_count > min_count else 50
+                heatmap_data = df_aggregated.to_dict(orient='records')
         
         elif heatmap_type_req == "population" and city_name == "tehran":
             print("Generating population heatmap...")
