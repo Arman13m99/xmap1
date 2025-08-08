@@ -150,7 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
             daterangeEndEl.value = today.toISOString().split('T')[0];
             updateVendorIconSize(vendorMarkerSizeEl.value); 
             
-            // Adjust default heatmap values for normalized data (0-100 range)
+            // Adjust default heatmap values for normalized data (0-1 range)
             heatmapRadiusEl.value = "25";
             heatmapRadiusValueEl.textContent = "25";
             heatmapBlurEl.value = "15";
@@ -161,7 +161,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Add tooltips to help users understand the parameters
             heatmapRadiusEl.title = "Controls the spread of heat from each point (5-50 pixels)";
             heatmapBlurEl.title = "Controls smoothness of color transitions (1-40)";
-            heatmapMaxValEl.title = "Sets when maximum color is reached (0.1-2.0)";
+            heatmapMaxValEl.title = "Sets when maximum color is reached (0.1-1.0)";
             
             // Initialize radius modifier
             vendorRadiusModifierEl.value = "100";
@@ -713,14 +713,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentHeatmapType === 'none' || !lastHeatmapData || lastHeatmapData.length === 0) {
             return;
         }
-        const heatPoints = lastHeatmapData.map(p => [p.lat, p.lng, p.value]);
+        const heatPoints = lastHeatmapData.map(p => [p.lat, p.lng, parseFloat(p.value)]);
         
         // Adjusted options for normalized data
         let heatOptions = { 
             radius: parseInt(heatmapRadiusEl.value), 
             blur: parseInt(heatmapBlurEl.value), 
             maxZoom: 18, 
-            max: parseFloat(heatmapMaxValEl.value), // Now works well with normalized 0-100 values
+            max: parseFloat(heatmapMaxValEl.value), // Now works well with normalized 0-1 values
             minOpacity: 0.3  // Add minimum opacity for better visibility
         };
         
