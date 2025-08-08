@@ -3,6 +3,7 @@ Flask==2.3.3
 flask-cors==4.0.0
 pandas==2.0.3
 numpy==1.24.3
+scipy==1.11.4
 geopandas==0.13.2
 shapely==2.0.1
 
@@ -17,3 +18,4 @@ python-dotenv==1.0.0  # Environment variables support
 # Spatial indexing (optional but recommended for better performance)
 rtree==1.0.1      # Requires GEOS library
 pygeos==0.14.0    # Alternative spatial operations (optional)
+ 
