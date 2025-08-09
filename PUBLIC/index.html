@@ -1,5 +1,4 @@
-
-<!-- index.html (Full updated file) -->
+<!-- index.html (Complete updated file with enhanced heatmap controls) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -187,35 +186,83 @@ or one per line"></textarea>
                     <input type="checkbox" id="area-fill-none" title="No area fill">
                     <label for="area-fill-none" class="checkbox-label">None</label>
                 </div>
-                <div id="grid-visualization-section">
+                <div id="grid-visualization-section" style="display: block;">
                     <hr>
-                    <h4>Grid Visualization</h4>
+                    <h4>Coverage Grid Controls (200m)</h4>
+                    <div class="filter-item">
+                        <small style="display: block; margin-bottom: 8px; color: var(--text-muted);">
+                            These controls only work when "Coverage Grid (200m)" is selected as Polygon Display Type above.
+                        </small>
+                    </div>
                     <div class="filter-item">
                         <label for="grid-blur">Grid Blur: <span id="grid-blur-value">0</span>px</label>
                         <input type="range" id="grid-blur" min="0" max="10" value="0" step="1">
+                        <small style="display: block; margin-top: 2px; color: var(--text-muted);">
+                            Adds blur effect to grid points for better visualization
+                        </small>
                     </div>
                     <div class="filter-item">
-                        <label for="grid-fade">Grid Fade: <span id="grid-fade-value">100</span>%</label>
+                        <label for="grid-fade">Grid Opacity: <span id="grid-fade-value">100</span>%</label>
                         <input type="range" id="grid-fade" min="0" max="100" value="100" step="5">
+                        <small style="display: block; margin-top: 2px; color: var(--text-muted);">
+                            Controls transparency of the 200m coverage grid
+                        </small>
                     </div>
                     <div class="filter-item">
-                        <label for="marketing-areas-on-top">Marketing Areas on Top:</label>
+                        <label for="marketing-areas-on-top">Marketing Areas Overlay:</label>
                         <button id="marketing-areas-on-top" class="btn-toggle">Off</button>
+                        <small style="display: block; margin-top: 4px; color: var(--text-muted);">
+                            Shows marketing area boundaries on top of the grid for context
+                        </small>
+                    </div>
+                    <div class="filter-item">
+                        <label for="grid-point-size">Grid Point Size: <span id="grid-point-size-value">6</span>px</label>
+                        <input type="range" id="grid-point-size" min="3" max="12" value="6" step="1">
+                        <small style="display: block; margin-top: 2px; color: var(--text-muted);">
+                            Size of individual grid points (coverage circles)
+                        </small>
                     </div>
                 </div>
                 <hr>
                 <h4>Heatmap Controls</h4>
+                <div class="filter-item">
+                    <label for="heatmap-auto-optimize">Auto-Optimize:</label>
+                    <button id="heatmap-auto-optimize" class="btn-toggle active">Auto-Optimize On</button>
+                    <small style="display: block; margin-top: 4px; color: var(--text-muted);">
+                        Automatically adjusts heatmap parameters based on zoom level and data distribution for consistent visualization.
+                    </small>
+                </div>
+                <div class="filter-item">
+                    <label for="heatmap-smooth-transitions">Smooth Transitions:</label>
+                    <button id="heatmap-smooth-transitions" class="btn-toggle active">Smooth On</button>
+                    <small style="display: block; margin-top: 4px; color: var(--text-muted);">
+                        Enables gradual parameter changes when zooming to prevent dramatic visual shifts.
+                    </small>
+                </div>
+                <div class="filter-item">
+                    <label for="heatmap-reset-params">Reset Parameters:</label>
+                    <button id="heatmap-reset-params" class="btn-secondary" style="width: 100%;">Reset to Optimal</button>
+                </div>
                  <div class="filter-item">
                     <label for="heatmap-radius">Radius (Density): <span id="heatmap-radius-value">25</span></label>
-                    <input type="range" id="heatmap-radius" min="5" max="50" value="25" step="1">
+                    <input type="range" id="heatmap-radius" min="5" max="60" value="25" step="1">
+                    <small style="display: block; margin-top: 2px; color: var(--text-muted);">
+                        Controls heat spread. Auto-adjusts with zoom when optimized.
+                    </small>
                 </div>
                  <div class="filter-item">
                     <label for="heatmap-blur">Blur: <span id="heatmap-blur-value">15</span></label>
                     <input type="range" id="heatmap-blur" min="1" max="40" value="15" step="1">
+                    <small style="display: block; margin-top: 2px; color: var(--text-muted);">
+                        Smoothness of transitions. Auto-adjusts based on data density.
+                    </small>
                 </div>
-                <div class="filter-item">
+                 <div class="filter-item">
                     <label for="heatmap-max-val">Max Intensity: <span id="heatmap-max-val-value">1.0</span></label>
-                    <input type="range" id="heatmap-max-val" min="0.1" max="1.0" value="1.0" step="0.1">
+                    <input type="range" id="heatmap-max-val" min="0.1" max="3.0" value="1.0" step="0.1">
+                    <small style="display: block; margin-top: 2px; color: var(--text-muted);">
+                        Maximum color threshold. Auto-optimized to data distribution.
+                    </small>
                 </div>
             </aside>
         </div>

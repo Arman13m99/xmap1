@@ -1,4 +1,4 @@
-// script.js (Full updated file with fixes for "Marketing Areas on Top")
+// script.js (Complete updated file with improved heatmap system)
 document.addEventListener('DOMContentLoaded', () => {
     let map;
     let vendorLayerGroup = L.featureGroup();
@@ -18,7 +18,21 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentRadiusMode = 'percentage';
     let currentRadiusFixed = 3.0;
     let marketingAreasOnTop = false;
+    
+    // NEW: Improved heatmap management variables
+    let currentZoomLevel = 11;
+    let heatmapConfig = {
+        autoOptimize: true,
+        baseRadius: 25,
+        baseBlur: 15,
+        maxIntensity: 1.0,
+        smoothTransitions: true,
+        zoomIndependent: true
+    };
+    let lastOptimalParams = null;
+
     const API_BASE_URL = '/api';
+    
     // --- DOM Elements ---
     const bodyEl = document.body;
     const daterangeStartEl = document.getElementById('daterange-start');
@@ -37,12 +51,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const areaFillColorEl = document.getElementById('area-fill-color');
     const areaFillNoneEl = document.getElementById('area-fill-none');
     const applyFiltersBtn = document.getElementById('apply-filters-btn');
-    // New elements
+    
+    // Radius modifier elements
     const vendorRadiusModifierEl = document.getElementById('vendor-radius-modifier');
     const radiusModifierValueEl = document.getElementById('radius-modifier-value');
     const btnResetRadius = document.getElementById('btn-reset-radius');
     
-    // New radius mode elements
+    // Radius mode elements
     const radiusModeSelector = document.getElementById('radius-mode-selector');
     const radiusPercentageControl = document.getElementById('radius-percentage-control');
     const radiusFixedControl = document.getElementById('radius-fixed-control');
@@ -56,6 +71,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const gridFadeValueEl = document.getElementById('grid-fade-value');
     const marketingAreasOnTopBtn = document.getElementById('marketing-areas-on-top');
     const gridVisualizationSection = document.getElementById('grid-visualization-section');
+    const gridPointSizeEl = document.getElementById('grid-point-size');
+    const gridPointSizeValueEl = document.getElementById('grid-point-size-value');
+    
     // Lat/Lng finder elements
     const latFinderInputEl = document.getElementById('lat-finder-input');
     const lngFinderInputEl = document.getElementById('lng-finder-input');
@@ -68,6 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
         globalLoadingOverlayEl.id = 'map-loading-overlay-wrapper';
         document.body.appendChild(globalLoadingOverlayEl); 
     }
+    
     const mapTypeButtons = {
         densityTotal: document.getElementById('btn-order-density-total'),
         densityOrganic: document.getElementById('btn-order-density-organic'),
@@ -78,12 +97,15 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     const btnToggleVendors = document.getElementById('btn-toggle-vendors');
     const btnClearHeatmap = document.getElementById('btn-clear-heatmap');
+    
+    // Heatmap control elements
     const heatmapRadiusEl = document.getElementById('heatmap-radius');
     const heatmapRadiusValueEl = document.getElementById('heatmap-radius-value');
     const heatmapBlurEl = document.getElementById('heatmap-blur');
     const heatmapBlurValueEl = document.getElementById('heatmap-blur-value');
     const heatmapMaxValEl = document.getElementById('heatmap-max-val');
     const heatmapMaxValValueEl = document.getElementById('heatmap-max-val-value');
+
     const customFilterConfigs = {
         areaSubType: {
             button: document.getElementById('area-sub-type-filter-button'),
@@ -111,6 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
             paramName: 'vendor_area_sub_type', defaultText: 'Select Sub Areas', optionsData: []
         }
     };
+
     let defaultVendorIcon = L.icon({
         iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
         iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
@@ -120,6 +143,123 @@ document.addEventListener('DOMContentLoaded', () => {
         popupAnchor: [0, -12 * (41/25) * 2],
         shadowSize: [12 * (41/25) * 2, 12 * (41/25) * 2],
     });
+
+    // NEW: Enhanced heatmap configuration functions
+    function calculateOptimalHeatmapParams(data, zoomLevel) {
+        if (!data || data.length === 0) {
+            return { max: 1.0, radius: 25, blur: 15 };
+        }
+
+        const values = data.map(point => point.value).filter(v => v != null && !isNaN(v));
+        if (values.length === 0) {
+            return { max: 1.0, radius: 25, blur: 15 };
+        }
+
+        // Calculate percentiles for robust statistics
+        values.sort((a, b) => a - b);
+        const p75 = values[Math.floor(values.length * 0.75)];
+        const p90 = values[Math.floor(values.length * 0.90)];
+        const p95 = values[Math.floor(values.length * 0.95)];
+
+        // Set max to 90th percentile to avoid outlier dominance
+        let optimalMax = p90 / 100.0;
+        if (optimalMax <= 0) optimalMax = 1.0;
+        
+        // Zoom-dependent radius scaling
+        let radiusMultiplier = 1.0;
+        if (zoomLevel <= 10) {
+            radiusMultiplier = 1.8;
+        } else if (zoomLevel <= 12) {
+            radiusMultiplier = 1.4;
+        } else if (zoomLevel >= 16) {
+            radiusMultiplier = 0.7;
+        } else if (zoomLevel >= 14) {
+            radiusMultiplier = 0.85;
+        }
+
+        const optimalRadius = Math.round(heatmapConfig.baseRadius * radiusMultiplier);
+
+        // Data density-dependent blur
+        const dataDensity = data.length / 1000;
+        let blurMultiplier = 1.0;
+        if (dataDensity > 3) {
+            blurMultiplier = 1.4;  // More blur for very dense data
+        } else if (dataDensity > 1.5) {
+            blurMultiplier = 1.2;  // Slightly more blur for dense data
+        } else if (dataDensity < 0.5) {
+            blurMultiplier = 0.8;  // Less blur for sparse data
+        }
+
+        const optimalBlur = Math.round(heatmapConfig.baseBlur * blurMultiplier);
+
+        return {
+            max: Math.max(0.1, Math.min(3.0, optimalMax)),
+            radius: Math.max(5, Math.min(60, optimalRadius)),
+            blur: Math.max(5, Math.min(40, optimalBlur))
+        };
+    }
+
+    function getZoomAdjustedHeatmapOptions() {
+        const currentZoom = map.getZoom();
+        const userRadius = parseInt(heatmapRadiusEl.value);
+        const userBlur = parseInt(heatmapBlurEl.value);
+        const userMax = parseFloat(heatmapMaxValEl.value);
+        
+        if (!heatmapConfig.autoOptimize) {
+            // Use user-defined values with minimal zoom adjustment
+            const zoomFactor = Math.pow(1.1, currentZoom - 11); // Reference zoom 11
+            return {
+                radius: Math.round(userRadius * Math.min(2, Math.max(0.5, zoomFactor))),
+                blur: userBlur,
+                max: userMax,
+                minOpacity: 0.3
+            };
+        }
+
+        // Auto-optimize mode
+        if (lastOptimalParams && heatmapConfig.smoothTransitions) {
+            // Smooth transition to new optimal parameters
+            const optimal = calculateOptimalHeatmapParams(lastHeatmapData, currentZoom);
+            return {
+                radius: Math.round((lastOptimalParams.radius + optimal.radius) / 2),
+                blur: Math.round((lastOptimalParams.blur + optimal.blur) / 2),
+                max: (lastOptimalParams.max + optimal.max) / 2,
+                minOpacity: 0.3
+            };
+        }
+
+        return calculateOptimalHeatmapParams(lastHeatmapData, currentZoom);
+    }
+
+    function updateHeatmapControlsDisplay(optimalParams) {
+        if (!heatmapConfig.autoOptimize || !optimalParams) return;
+
+        // Update sliders to show optimal values without triggering events
+        const originalRadiusHandler = heatmapRadiusEl.oninput;
+        const originalBlurHandler = heatmapBlurEl.oninput;
+        const originalMaxHandler = heatmapMaxValEl.oninput;
+
+        heatmapRadiusEl.oninput = null;
+        heatmapBlurEl.oninput = null;
+        heatmapMaxValEl.oninput = null;
+
+        heatmapRadiusEl.value = optimalParams.radius;
+        heatmapRadiusValueEl.textContent = optimalParams.radius;
+
+        heatmapBlurEl.value = optimalParams.blur;
+        heatmapBlurValueEl.textContent = optimalParams.blur;
+
+        heatmapMaxValEl.value = optimalParams.max.toFixed(1);
+        heatmapMaxValValueEl.textContent = optimalParams.max.toFixed(1);
+
+        // Restore event handlers
+        setTimeout(() => {
+            heatmapRadiusEl.oninput = originalRadiusHandler;
+            heatmapBlurEl.oninput = originalBlurHandler;
+            heatmapMaxValEl.oninput = originalMaxHandler;
+        }, 100);
+    }
+
     function updateVendorIconSize(baseSize) { 
         const aspectRatio = 41/25;
         const iconWidth = parseInt(baseSize);
@@ -137,6 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
         markerSizeValueEl.textContent = baseSize;
         if(vendorsAreVisible) redrawVendorMarkersAndRadii();
     }
+
     function init() {
         initMap();
         fetchInitialFilterData().then(() => {
@@ -144,13 +285,15 @@ document.addEventListener('DOMContentLoaded', () => {
             initializeCustomDropdowns();
             applyDefaultFilters(); 
             setupEventListeners();
+            setupHeatmapZoomHandler(); // NEW: Setup zoom handler
+
             const today = new Date(); 
             const thirtyDaysAgo = new Date(new Date().setDate(today.getDate() - 30));
             daterangeStartEl.value = thirtyDaysAgo.toISOString().split('T')[0];
             daterangeEndEl.value = today.toISOString().split('T')[0];
             updateVendorIconSize(vendorMarkerSizeEl.value); 
             
-            // Adjust default heatmap values for normalized data (0-1 range)
+            // Enhanced default heatmap values
             heatmapRadiusEl.value = "25";
             heatmapRadiusValueEl.textContent = "25";
             heatmapBlurEl.value = "15";
@@ -158,10 +301,10 @@ document.addEventListener('DOMContentLoaded', () => {
             heatmapMaxValEl.value = "1.0";
             heatmapMaxValValueEl.textContent = "1.0";
             
-            // Add tooltips to help users understand the parameters
-            heatmapRadiusEl.title = "Controls the spread of heat from each point (5-50 pixels)";
-            heatmapBlurEl.title = "Controls smoothness of color transitions (1-40)";
-            heatmapMaxValEl.title = "Sets when maximum color is reached (0.1-1.0)";
+            // Enhanced tooltips
+            heatmapRadiusEl.title = "Heatmap point spread radius. Auto-adjusts with zoom when optimized.";
+            heatmapBlurEl.title = "Smoothness of heat transitions. Auto-adjusts based on data density.";
+            heatmapMaxValEl.title = "Maximum intensity threshold. Auto-optimized to data distribution.";
             
             // Initialize radius modifier
             vendorRadiusModifierEl.value = "100";
@@ -177,9 +320,11 @@ document.addEventListener('DOMContentLoaded', () => {
             gridBlurValueEl.textContent = "0";
             gridFadeEl.value = "100";
             gridFadeValueEl.textContent = "100";
+            gridPointSizeEl.value = "6";
+            gridPointSizeValueEl.textContent = "6";
             marketingAreasOnTop = false;
             marketingAreasOnTopBtn.classList.remove('active');
-            gridVisualizationSection.style.display = 'none'; // Initially hide
+            // Grid visualization section is now always visible
             
             btnToggleVendors.textContent = vendorsAreVisible ? 'Vendors On' : 'Vendors Off';
             btnToggleVendors.classList.toggle('active', vendorsAreVisible);
@@ -189,6 +334,7 @@ document.addEventListener('DOMContentLoaded', () => {
             showLoading(true, `Initialization failed: ${error.message}. Please refresh.`);
         });
     }
+
     function initMap() {
         const mapContainer = document.getElementById('map');
         if(mapContainer) mapContainer.innerHTML = ''; else { console.error("Map container ('map') not found!"); return; }
@@ -215,6 +361,39 @@ document.addEventListener('DOMContentLoaded', () => {
         polygonLayerGroup.addTo(map);
         coverageGridLayerGroup.addTo(map);
     }
+
+    // NEW: Zoom event handler for consistent heatmap rendering
+    function setupHeatmapZoomHandler() {
+        let zoomTimeout;
+        
+        map.on('zoomstart', () => {
+            // Clear any pending zoom updates
+            if (zoomTimeout) {
+                clearTimeout(zoomTimeout);
+            }
+        });
+
+        map.on('zoomend', () => {
+            const newZoomLevel = map.getZoom();
+            
+            // Only update if zoom level actually changed significantly
+            if (Math.abs(newZoomLevel - currentZoomLevel) >= 0.5) {
+                currentZoomLevel = newZoomLevel;
+                
+                // Debounce the heatmap update
+                if (zoomTimeout) {
+                    clearTimeout(zoomTimeout);
+                }
+                
+                zoomTimeout = setTimeout(() => {
+                    if (currentHeatmapType !== 'none' && lastHeatmapData) {
+                        renderCurrentHeatmap();
+                    }
+                }, 200); // Small delay to ensure smooth zooming
+            }
+        });
+    }
+
     async function fetchInitialFilterData() {
         showLoading(true, 'Fetching initial settings...');
         try {
@@ -241,6 +420,7 @@ document.addEventListener('DOMContentLoaded', () => {
         populateSelectWithOptions(cityEl, initialFilterData.cities.map(c => ({ value: c.name, text: c.name })), false);
         cityEl.value = "tehran";
     }
+
     function initializeCustomDropdowns() {
         if (!initialFilterData) return;
         customFilterConfigs.businessLine.optionsData = (initialFilterData.business_lines || [])
@@ -256,6 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateCityDependentCustomFilters(cityEl.value);
         updateVendorAreaSubTypeFilter();
     }
+
     function applyDefaultFilters() {
         const statusConfig = customFilterConfigs.vendorStatus;
         const status5Option = statusConfig.optionsData.find(opt => opt.value === "5");
@@ -278,6 +459,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateCityDependentCustomFilters(selectedCity) {
         updateAreaSubTypeCustomFilter();
     }
+
     function updateAreaSubTypeCustomFilter() {
         if (!initialFilterData) return;
         const selectedAreaMainType = areaMainTypeEl.value;
@@ -329,6 +511,7 @@ document.addEventListener('DOMContentLoaded', () => {
             .map(opt => ({ value: opt.value, text: opt.text, checked: false }));
         renderCustomDropdown(customFilterConfigs.vendorAreaSubType);
     }
+
     function decodeURIComponentSafe(str) {
         if (!str) return str;
         try {
@@ -348,6 +531,7 @@ document.addEventListener('DOMContentLoaded', () => {
             selectElement.add(option);
         });
     }
+
     function renderCustomDropdown(config) {
         config.panel.innerHTML = '';
         if (!config.optionsData || config.optionsData.length === 0) {
@@ -380,6 +564,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         updateCustomDropdownButtonText(config);
     }
+
     function updateCustomDropdownButtonText(config) {
         const selectedOptions = config.optionsData.filter(opt => opt.checked);
         const selectedCount = selectedOptions.length;
@@ -392,9 +577,11 @@ document.addEventListener('DOMContentLoaded', () => {
             config.button.textContent = `${selectedCount} selected`;
         }
     }
+
     function getSelectedValuesFromCustomDropdown(config) {
         return config.optionsData.filter(opt => opt.checked).map(opt => opt.value);
     }
+
     function toggleDropdown(config, forceClose = false) {
         const isOpen = config.panel.classList.contains('open');
         if (forceClose || isOpen) {
@@ -408,6 +595,65 @@ document.addEventListener('DOMContentLoaded', () => {
             config.button.classList.add('open');
         }
     }
+
+    // Additional event listeners for new heatmap controls
+    function setupAdditionalHeatmapListeners() {
+        // Auto-optimize toggle
+        const autoOptimizeBtn = document.getElementById('heatmap-auto-optimize');
+        if (autoOptimizeBtn) {
+            autoOptimizeBtn.addEventListener('click', () => {
+                heatmapConfig.autoOptimize = !heatmapConfig.autoOptimize;
+                autoOptimizeBtn.textContent = heatmapConfig.autoOptimize ? 'Auto-Optimize On' : 'Auto-Optimize Off';
+                autoOptimizeBtn.classList.toggle('active', heatmapConfig.autoOptimize);
+                
+                if (heatmapConfig.autoOptimize && currentHeatmapType !== 'none' && lastHeatmapData) {
+                    renderCurrentHeatmap();
+                }
+            });
+        }
+
+        // Smooth transitions toggle
+        const smoothTransitionsBtn = document.getElementById('heatmap-smooth-transitions');
+        if (smoothTransitionsBtn) {
+            smoothTransitionsBtn.addEventListener('click', () => {
+                heatmapConfig.smoothTransitions = !heatmapConfig.smoothTransitions;
+                smoothTransitionsBtn.textContent = heatmapConfig.smoothTransitions ? 'Smooth On' : 'Smooth Off';
+                smoothTransitionsBtn.classList.toggle('active', heatmapConfig.smoothTransitions);
+            });
+        }
+
+        // Reset parameters button
+        const resetParamsBtn = document.getElementById('heatmap-reset-params');
+        if (resetParamsBtn) {
+            resetParamsBtn.addEventListener('click', () => {
+                // Reset to auto-optimize mode
+                heatmapConfig.autoOptimize = true;
+                heatmapConfig.smoothTransitions = true;
+                
+                // Update button states
+                if (autoOptimizeBtn) {
+                    autoOptimizeBtn.textContent = 'Auto-Optimize On';
+                    autoOptimizeBtn.classList.add('active');
+                }
+                
+                if (smoothTransitionsBtn) {
+                    smoothTransitionsBtn.textContent = 'Smooth On';
+                    smoothTransitionsBtn.classList.add('active');
+                }
+                
+                // Reset base configuration
+                heatmapConfig.baseRadius = 25;
+                heatmapConfig.baseBlur = 15;
+                heatmapConfig.maxIntensity = 1.0;
+                
+                // Re-render heatmap with optimal parameters
+                if (currentHeatmapType !== 'none' && lastHeatmapData) {
+                    renderCurrentHeatmap();
+                }
+            });
+        }
+    }
+
     function setupEventListeners() {
         applyFiltersBtn.addEventListener('click', fetchAndDisplayMapData);
         cityEl.addEventListener('change', (e) => {
@@ -416,14 +662,11 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         areaMainTypeEl.addEventListener('change', () => {
             updateAreaSubTypeCustomFilter();
-            // Show/hide grid visualization controls based on selection
-            if (areaMainTypeEl.value === 'coverage_grid') {
-                gridVisualizationSection.style.display = 'block';
-            } else {
-                gridVisualizationSection.style.display = 'none';
-            }
+            // Note: Grid visualization controls are now always visible
+            // They will be functional when Coverage Grid is selected
         });
         vendorAreaMainTypeEl.addEventListener('change', updateVendorAreaSubTypeFilter);
+        
         // Lat/Lng finder
         btnFindLocation.addEventListener('click', () => {
             const lat = parseFloat(latFinderInputEl.value);
@@ -481,17 +724,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (map.hasLayer(vendorLayerGroup)) map.removeLayer(vendorLayerGroup);
             }
         });
+        
         btnClearHeatmap.addEventListener('click', () => {
             currentHeatmapType = 'none';
             setActiveMapTypeButton(null);
             if (heatmapLayer) { map.removeLayer(heatmapLayer); heatmapLayer = null; }
         });
+        
         Object.values(customFilterConfigs).forEach(config => {
             config.button.addEventListener('click', (e) => {
                 e.stopPropagation();
                 toggleDropdown(config);
             });
         });
+        
         document.addEventListener('click', (e) => {
             Object.values(customFilterConfigs).forEach(config => {
                 if (config.button && !config.button.contains(e.target) && config.panel && !config.panel.contains(e.target)) {
@@ -499,6 +745,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             });
         });
+        
         vendorRadiusToggleBtn.addEventListener('click', () => {
             showVendorRadius = !showVendorRadius;
             vendorRadiusToggleBtn.textContent = showVendorRadius ? 'Hide Radius' : 'Show Radius';
@@ -551,6 +798,14 @@ document.addEventListener('DOMContentLoaded', () => {
             applyGridVisualizationEffects();
         });
         
+        gridPointSizeEl.addEventListener('input', (e) => {
+            gridPointSizeValueEl.textContent = e.target.value;
+            // Re-draw grid with new point size
+            if (areaMainTypeEl.value === 'coverage_grid') {
+                drawCoverageGrid();
+            }
+        });
+        
         // --- MODIFIED Event Listener for marketingAreasOnTopBtn ---
         marketingAreasOnTopBtn.addEventListener('click', () => {
             marketingAreasOnTop = !marketingAreasOnTop;
@@ -581,9 +836,53 @@ document.addEventListener('DOMContentLoaded', () => {
         areaFillColorEl.addEventListener('input', restylePolygons);
         areaFillNoneEl.addEventListener('change', restylePolygons);
         vendorMarkerSizeEl.addEventListener('input', (e) => updateVendorIconSize(e.target.value));
-        heatmapRadiusEl.addEventListener('input', (e) => { heatmapRadiusValueEl.textContent = e.target.value; renderCurrentHeatmap(); });
-        heatmapBlurEl.addEventListener('input', (e) => { heatmapBlurValueEl.textContent = e.target.value; renderCurrentHeatmap(); });
-        heatmapMaxValEl.addEventListener('input', (e) => { heatmapMaxValValueEl.textContent = e.target.value; renderCurrentHeatmap(); });
+        
+        // Enhanced heatmap control event listeners
+        heatmapRadiusEl.addEventListener('input', (e) => {
+            heatmapRadiusValueEl.textContent = e.target.value;
+            heatmapConfig.autoOptimize = false; // Disable auto-optimize when user adjusts manually
+            heatmapConfig.baseRadius = parseInt(e.target.value); // Update base value
+            
+            // Update auto-optimize button state
+            const autoOptimizeBtn = document.getElementById('heatmap-auto-optimize');
+            if (autoOptimizeBtn) {
+                autoOptimizeBtn.textContent = 'Auto-Optimize Off';
+                autoOptimizeBtn.classList.remove('active');
+            }
+            
+            renderCurrentHeatmap();
+        });
+
+        heatmapBlurEl.addEventListener('input', (e) => {
+            heatmapBlurValueEl.textContent = e.target.value;
+            heatmapConfig.autoOptimize = false;
+            heatmapConfig.baseBlur = parseInt(e.target.value);
+            
+            const autoOptimizeBtn = document.getElementById('heatmap-auto-optimize');
+            if (autoOptimizeBtn) {
+                autoOptimizeBtn.textContent = 'Auto-Optimize Off';
+                autoOptimizeBtn.classList.remove('active');
+            }
+            
+            renderCurrentHeatmap();
+        });
+
+        heatmapMaxValEl.addEventListener('input', (e) => {
+            heatmapMaxValValueEl.textContent = e.target.value;
+            heatmapConfig.autoOptimize = false;
+            heatmapConfig.maxIntensity = parseFloat(e.target.value);
+            
+            const autoOptimizeBtn = document.getElementById('heatmap-auto-optimize');
+            if (autoOptimizeBtn) {
+                autoOptimizeBtn.textContent = 'Auto-Optimize Off';
+                autoOptimizeBtn.classList.remove('active');
+            }
+            
+            renderCurrentHeatmap();
+        });
+
+        // Setup additional controls
+        setupAdditionalHeatmapListeners();
     }
     
     function setActiveMapTypeButton(activeTypeKey) {
@@ -592,6 +891,7 @@ document.addEventListener('DOMContentLoaded', () => {
             mapTypeButtons[activeTypeKey].classList.add('active-map-type');
         }
     }
+
     function showLoading(isLoading, message = 'LOADING ...') {
         if (isLoading) {
             bodyEl.classList.add('is-loading');
@@ -603,12 +903,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
+    // NEW: Enhanced fetchAndDisplayMapData function (add zoom level parameter)
     async function fetchAndDisplayMapData() {
         // Clear the temporary marker on new search
         if (tempLocationMarker) {
             map.removeLayer(tempLocationMarker);
             tempLocationMarker = null;
         }
+
         const params = new URLSearchParams();
         const isCoverageGrid = areaMainTypeEl.value === 'coverage_grid';
         const selectedCity = cityEl.value;
@@ -616,23 +918,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (isCoverageGrid && selectedCity === 'tehran') {
             if (selectedBLs.length !== 1) {
-                showLoading(false); // Hide any existing loading overlay
+                showLoading(false);
                 alert('Target-based Coverage Analysis requires selecting exactly ONE Business Line.');
-                // Re-enable the button in case it was disabled
                 if(applyFiltersBtn) applyFiltersBtn.disabled = false;
-                return; // Stop the function from proceeding
+                return;
             }
         }
+
         params.append('city', cityEl.value);
         params.append('start_date', daterangeStartEl.value);
         params.append('end_date', daterangeEndEl.value);
         params.append('area_type_display', areaMainTypeEl.value);
+        
+        // NEW: Add current zoom level to params for backend optimization
+        params.append('zoom_level', map.getZoom().toString());
+
         getSelectedValuesFromCustomDropdown(customFilterConfigs.areaSubType)
             .forEach(val => params.append(customFilterConfigs.areaSubType.paramName, val));
         getSelectedValuesFromCustomDropdown(customFilterConfigs.businessLine)
             .forEach(val => params.append(customFilterConfigs.businessLine.paramName, val));
+
         const vendorCodesText = vendorCodesFilterEl.value.trim();
         if (vendorCodesText) params.append('vendor_codes_filter', vendorCodesText);
+
         params.append('vendor_area_main_type', vendorAreaMainTypeEl.value);
         getSelectedValuesFromCustomDropdown(customFilterConfigs.vendorAreaSubType)
             .forEach(val => params.append(customFilterConfigs.vendorAreaSubType.paramName, val));
@@ -640,14 +948,17 @@ document.addEventListener('DOMContentLoaded', () => {
             .forEach(val => params.append(customFilterConfigs.vendorStatus.paramName, val));
         getSelectedValuesFromCustomDropdown(customFilterConfigs.vendorGrade)
             .forEach(val => params.append(customFilterConfigs.vendorGrade.paramName, val));
+
         params.append('vendor_visible', vendorVisibleEl.value);
         params.append('vendor_is_open', vendorIsOpenEl.value);
         params.append('heatmap_type_request', currentHeatmapType);
         params.append('radius_modifier', currentRadiusModifier);
         params.append('radius_mode', currentRadiusMode);
         params.append('radius_fixed', currentRadiusFixed);
+
         console.log("Fetching map data with params:", params.toString());
-        showLoading(true); 
+        showLoading(true);
+
         try {
             const response = await fetch(`${API_BASE_URL}/map-data?${params.toString()}`);
             if (!response.ok) {
@@ -655,20 +966,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 showLoading(true, `Error: ${errorData.error || response.statusText}. Check console.`);
                 throw new Error(`HTTP error ${response.status}: ${errorData.error || response.statusText}`);
             }
+
             const data = await response.json();
             if(data.error){
                 showLoading(true, `Backend error: ${data.error}. Check console.`);
                 throw new Error(`Backend error: ${data.error} - ${data.details || ''}`);
             }
+
             allVendorsData = data.vendors || [];
             allPolygonsData = data.polygons || null;
-            lastHeatmapData = data.heatmap_data || null; 
+            lastHeatmapData = data.heatmap_data || null;
             allCoverageGridData = data.coverage_grid || [];
-            
+
             // Debug logging for heatmap data
-            if (isCoverageGrid && allCoverageGridData.length > 0) {
-                console.log(`Received ${allCoverageGridData.length} coverage grid points.`);
-                console.log('Sample of first received coverage point:', JSON.stringify(allCoverageGridData[0], null, 2));
+            if (lastHeatmapData && lastHeatmapData.length > 0) {
+                console.log(`Received ${lastHeatmapData.length} heatmap points for type: ${currentHeatmapType}`);
+                const values = lastHeatmapData.map(p => p.value).filter(v => v != null);
+                if (values.length > 0) {
+                    console.log(`Value range: ${Math.min(...values).toFixed(2)} - ${Math.max(...values).toFixed(2)}`);
+                }
             }
 
             updateMapLayers();
@@ -687,7 +1003,6 @@ document.addEventListener('DOMContentLoaded', () => {
         restylePolygons(); // This always prepares the polygonLayerGroup with data and styles
         drawCoverageGrid();
         renderCurrentHeatmap();
-
         // --- NEW VISIBILITY LOGIC ---
         // When displaying the grid, polygons should be hidden by default.
         // The 'On Top' button is responsible for showing them.
@@ -702,62 +1017,118 @@ document.addEventListener('DOMContentLoaded', () => {
                 map.addLayer(polygonLayerGroup);
             }
         }
-
         adjustMapView();
         applyGridVisualizationEffects();
         updateLayerOrder();
     }
     
+    // NEW: Enhanced renderCurrentHeatmap function
     function renderCurrentHeatmap() {
-        if (heatmapLayer) { map.removeLayer(heatmapLayer); heatmapLayer = null; }
+        if (heatmapLayer) {
+            map.removeLayer(heatmapLayer);
+            heatmapLayer = null;
+        }
+
         if (currentHeatmapType === 'none' || !lastHeatmapData || lastHeatmapData.length === 0) {
             return;
         }
-        const heatPoints = lastHeatmapData.map(p => [p.lat, p.lng, parseFloat(p.value)]);
+
+        // Filter out invalid data points
+        const validData = lastHeatmapData.filter(p => 
+            p.lat != null && p.lng != null && p.value != null && 
+            !isNaN(p.lat) && !isNaN(p.lng) && !isNaN(p.value) &&
+            p.value > 0
+        );
+
+        if (validData.length === 0) {
+            console.warn('No valid heatmap data after filtering');
+            return;
+        }
+
+        currentZoomLevel = map.getZoom();
         
-        // Adjusted options for normalized data
-        let heatOptions = { 
-            radius: parseInt(heatmapRadiusEl.value), 
-            blur: parseInt(heatmapBlurEl.value), 
-            maxZoom: 18, 
-            max: parseFloat(heatmapMaxValEl.value), // Now works well with normalized 0-1 values
-            minOpacity: 0.3  // Add minimum opacity for better visibility
+        // Get optimized parameters
+        const optimalParams = heatmapConfig.autoOptimize ? 
+            calculateOptimalHeatmapParams(validData, currentZoomLevel) : 
+            getZoomAdjustedHeatmapOptions();
+
+        lastOptimalParams = optimalParams;
+
+        // Update UI to show optimal parameters
+        if (heatmapConfig.autoOptimize) {
+            updateHeatmapControlsDisplay(optimalParams);
+        }
+
+        // Prepare heatmap data with proper intensity scaling
+        const heatPoints = validData.map(p => {
+            // Ensure values are properly scaled for the heatmap
+            const intensity = Math.max(0.1, Math.min(100, p.value)) / 100;
+            return [p.lat, p.lng, intensity];
+        });
+
+        // Enhanced heatmap options
+        let heatOptions = {
+            radius: optimalParams.radius,
+            blur: optimalParams.blur,
+            max: optimalParams.max,
+            minOpacity: 0.3,
+            maxZoom: 18, // Keep this but rely more on our zoom-adjusted scaling
+            pane: 'overlayPane'  // Ensure proper layering
         };
-        
-        // Different gradients for different heatmap types
-        if (currentHeatmapType === 'order_density' || currentHeatmapType === 'order_density_organic' || currentHeatmapType === 'order_density_non_organic') {
-            // Order density heatmaps - cool to warm
+
+        // Enhanced gradients for different heatmap types
+        if (currentHeatmapType === 'order_density') {
             heatOptions.gradient = {
                 0.0: 'rgba(0, 0, 255, 0)',
-                0.2: 'rgba(0, 150, 255, 0.6)',
-                0.4: 'rgba(0, 255, 255, 0.8)',
-                0.6: 'rgba(0, 255, 0, 0.9)',
-                0.8: 'rgba(255, 255, 0, 1)',
+                0.15: 'rgba(0, 100, 255, 0.4)',
+                0.3: 'rgba(0, 200, 255, 0.6)',
+                0.5: 'rgba(0, 255, 100, 0.8)',
+                0.7: 'rgba(255, 255, 0, 0.9)',
+                1.0: 'rgba(255, 0, 0, 1)'
+            };
+        } else if (currentHeatmapType === 'order_density_organic') {
+            heatOptions.gradient = {
+                0.0: 'rgba(0, 128, 0, 0)',
+                0.2: 'rgba(0, 200, 0, 0.5)',
+                0.4: 'rgba(100, 255, 0, 0.7)',
+                0.6: 'rgba(200, 255, 0, 0.8)',
+                0.8: 'rgba(255, 200, 0, 0.9)',
+                1.0: 'rgba(255, 100, 0, 1)'
+            };
+        } else if (currentHeatmapType === 'order_density_non_organic') {
+            heatOptions.gradient = {
+                0.0: 'rgba(128, 0, 128, 0)',
+                0.2: 'rgba(150, 0, 150, 0.5)',
+                0.4: 'rgba(200, 0, 200, 0.7)',
+                0.6: 'rgba(255, 0, 150, 0.8)',
+                0.8: 'rgba(255, 50, 100, 0.9)',
                 1.0: 'rgba(255, 0, 0, 1)'
             };
         } else if (currentHeatmapType === 'user_density') {
-            // User density - purple to orange
             heatOptions.gradient = {
-                0.0: 'rgba(128, 0, 128, 0)',
-                0.2: 'rgba(147, 112, 219, 0.6)',
-                0.4: 'rgba(138, 43, 226, 0.8)',
-                0.6: 'rgba(255, 165, 0, 0.9)',
-                0.8: 'rgba(255, 140, 0, 1)',
-                1.0: 'rgba(255, 69, 0, 1)'
+                0.0: 'rgba(75, 0, 130, 0)',
+                0.2: 'rgba(100, 50, 200, 0.5)',
+                0.4: 'rgba(150, 100, 255, 0.7)',
+                0.6: 'rgba(200, 150, 255, 0.8)',
+                0.8: 'rgba(255, 200, 150, 0.9)',
+                1.0: 'rgba(255, 100, 0, 1)'
             };
         } else {
-            // Default gradient (population)
+            // Default gradient for population and others
             heatOptions.gradient = {
-                0.1: 'rgba(0,0,255,0)', 
-                0.3: 'rgba(0, 255, 255, 1)', 
-                0.5: 'rgba(0, 255, 0, 1)', 
-                0.7: 'rgba(255, 255, 0, 1)', 
+                0.0: 'rgba(0, 0, 255, 0)',
+                0.25: 'rgba(0, 255, 255, 0.6)',
+                0.5: 'rgba(0, 255, 0, 0.8)',
+                0.75: 'rgba(255, 255, 0, 0.9)',
                 1.0: 'rgba(255, 0, 0, 1)'
             };
         }
-        
+
+        console.log(`Rendering heatmap: ${validData.length} points, radius: ${optimalParams.radius}, blur: ${optimalParams.blur}, max: ${optimalParams.max.toFixed(2)}`);
+
         heatmapLayer = L.heatLayer(heatPoints, heatOptions).addTo(map);
-        // Make the heatmap canvas non-interactive so clicks pass through
+
+        // Make heatmap non-interactive
         if (heatmapLayer && heatmapLayer.getPane()) {
             heatmapLayer.getPane().style.pointerEvents = 'none';
         }
@@ -789,22 +1160,21 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function drawCoverageGrid() {
         coverageGridLayerGroup.clearLayers();
-
         if (areaMainTypeEl.value !== 'coverage_grid' || !allCoverageGridData || allCoverageGridData.length === 0) {
             return;
         }
-
+        
+        // Get current grid point size
+        const gridPointSize = parseInt(gridPointSizeEl.value) || 6;
+        
         allCoverageGridData.forEach(point => {
             let color = '#808080'; // Default to neutral grey
             let popupContent = `<b>Coverage at (${point.lat.toFixed(4)}, ${point.lng.toFixed(4)})</b><br>`;
-
             if (point.marketing_area) {
                 popupContent += `<b>Marketing Area:</b> ${decodeURIComponentSafe(point.marketing_area)}<br>`;
             }
-
             if (point.target_business_line && point.target_value != null) {
                 const { actual_value, target_value, performance_ratio } = point;
-
                 // Coloring logic based on performance ratio (actual / target)
                 if (actual_value === 0) {
                     color = '#d3d3d3'; // Light Grey (Zero Coverage)
@@ -823,7 +1193,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     color = '#000000'; // Black (Extremely Poor, <20%)
                 }
-
                 // Build a detailed popup for target-based analysis
                 popupContent += `<hr style="margin: 4px 0;"><b>Target Analysis (${point.target_business_line})</b><br>`;
                 popupContent += `<b>Target Count:</b> ${target_value}<br>`;
@@ -835,7 +1204,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 // for the selected business line in their area.
                 popupContent += `<br><i>No target data found for this Business Line in this area.</i>`;
             }
-
             // Add general coverage details to all popups
             const coverage = point.coverage;
             popupContent += `<hr style="margin: 4px 0;"><b>Total Covering Vendors:</b> ${coverage.total_vendors}<br>`;
@@ -847,7 +1215,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         popupContent += `  ${bl}: ${count}<br>`;
                     });
             }
-
             if (coverage.by_grade && Object.keys(coverage.by_grade).length > 0) {
                 popupContent += '<b>By Grade:</b><br>';
                 Object.entries(coverage.by_grade)
@@ -856,9 +1223,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         popupContent += `  ${grade}: ${count}<br>`;
                     });
             }
-
             const marker = L.circleMarker([point.lat, point.lng], {
-                radius: 6,
+                radius: gridPointSize,
                 fillColor: color,
                 color: '#333',
                 weight: 1,
@@ -866,7 +1232,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 fillOpacity: 0.8,
                 pane: 'coverageGridPane'
             });
-
             marker.bindPopup(popupContent);
             coverageGridLayerGroup.addLayer(marker);
         });
@@ -882,7 +1247,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (hasVisibleVendors) allVisibleLayers.addLayer(vendorLayerGroup);
         if (hasVisiblePolygons) allVisibleLayers.addLayer(polygonLayerGroup);
         if (hasVisibleCoverage) allVisibleLayers.addLayer(coverageGridLayerGroup);
-
         if (allVisibleLayers.getLayers().length > 0) {
             bounds = allVisibleLayers.getBounds();
         }
@@ -897,6 +1261,7 @@ document.addEventListener('DOMContentLoaded', () => {
             map.setView([29.5918, 52.5837], 12);
         }
     }
+
     function redrawVendorMarkersAndRadii() {
         vendorLayerGroup.clearLayers(); 
         if (!allVendorsData || allVendorsData.length === 0) return;
@@ -925,7 +1290,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
         circles.forEach(circle => vendorLayerGroup.removeLayer(circle));
-
         if (!showVendorRadius || !allVendorsData) return; 
         const rEdgeColor = radiusEdgeColorEl.value;
         const rInnerIsNone = radiusInnerNoneEl.checked;
@@ -943,6 +1307,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+
     function restylePolygons() {
         polygonLayerGroup.clearLayers();
         if (!allPolygonsData || !allPolygonsData.features || allPolygonsData.features.length === 0) return;
@@ -1015,5 +1380,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }).addTo(polygonLayerGroup);
     }
+
     init();
 });

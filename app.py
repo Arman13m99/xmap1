@@ -1,4 +1,4 @@
-# app.py (Full updated file)
+# app.py (Complete updated file with improved heatmap system)
 import os
 from datetime import datetime
 import re # For splitting vendor codes
@@ -17,13 +17,12 @@ import json
 import hashlib
 from functools import lru_cache
 from mini import fetch_question_data
+from scipy import stats  # NEW: Added for improved statistical functions
 
 # --- Configuration ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(BASE_DIR, 'src')
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
-
-
 METABASE_URL = "https://metabase.ofood.cloud"       
 METABASE_USERNAME = "a.mehmandoost@OFOOD.CLOUD"  
 METABASE_PASSWORD = "Fff322666@"   
@@ -31,7 +30,6 @@ ORDER_DATA_QUESTION_ID = 5822
 VENDOR_DATA_QUESTION_ID = 5045 
 WORKER_COUNT = 10    
 PAGE_SIZE = 100000 
-
 
 # --- Initialize Flask App ---
 app = Flask(__name__, static_folder=PUBLIC_DIR, static_url_path='')
@@ -165,7 +163,6 @@ def calculate_coverage_for_grid_vectorized(grid_points, df_vendors_filtered, cit
         vendor_business_lines = valid_vendors['business_line'].cat.add_categories(['Unknown']).fillna('Unknown').values
     else:
         vendor_business_lines = valid_vendors['business_line'].fillna('Unknown').values if 'business_line' in valid_vendors else None
-
     if 'grade' in valid_vendors and pd.api.types.is_categorical_dtype(valid_vendors['grade']):
         vendor_grades = valid_vendors['grade'].cat.add_categories(['Unknown']).fillna('Unknown').values
     else:
@@ -224,8 +221,6 @@ def calculate_coverage_for_grid_vectorized(grid_points, df_vendors_filtered, cit
     
     return coverage_results
 
-# In app.py, replace the old function with this one.
-
 def find_marketing_area_for_points(points, city_name):
     """
     Find which marketing area each point belongs to.
@@ -233,26 +228,20 @@ def find_marketing_area_for_points(points, city_name):
     """
     if city_name not in gdf_marketing_areas or gdf_marketing_areas[city_name].empty:
         return [(None, None)] * len(points)
-
     gdf_areas = gdf_marketing_areas[city_name]
     results = []
-
     try:
         from shapely.strtree import STRtree
         area_geoms = gdf_areas.geometry.values
         area_ids = gdf_areas['area_id'].values if 'area_id' in gdf_areas else [None] * len(gdf_areas)
         area_names = gdf_areas['name'].values if 'name' in gdf_areas else [None] * len(gdf_areas)
-
         # Create the spatial index from the polygon geometries
         tree = STRtree(area_geoms)
-
         for point in points:
             point_geom = Point(point['lng'], point['lat'])
-
             # Step 1: Query the tree to find candidate polygons (fast BBOX intersection)
             # This returns indices of geometries whose bounding boxes intersect the point's bounding box.
             candidate_indices = tree.query(point_geom)
-
             found_area = False
             # Step 2: Iterate through only the candidates and perform the exact 'contains' check
             for idx in candidate_indices:
@@ -262,11 +251,9 @@ def find_marketing_area_for_points(points, city_name):
                     results.append((area_ids[idx], area_names[idx]))
                     found_area = True
                     break  # Stop after finding the first containing polygon
-
             if not found_area:
                 # This point was not in any of the candidate polygons
                 results.append((None, None))
-
     except ImportError:
         # Fallback to non-indexed method (slower, but its logic was correct)
         print("Warning: shapely.strtree not found. Using slower point-in-polygon check.")
@@ -282,9 +269,260 @@ def find_marketing_area_for_points(points, city_name):
                     break
             if not found:
                 results.append((None, None))
-
     return results
 
+# NEW: Improved heatmap functions
+def remove_outliers_and_normalize_improved(df, value_column, method='robust'):
+    """
+    Improved outlier removal and normalization using robust statistical methods.
+    """
+    if df.empty or value_column not in df.columns:
+        return df
+    
+    df_copy = df.copy()
+    df_copy = df_copy[df_copy[value_column].notna() & (df_copy[value_column] > 0)]
+    
+    if df_copy.empty:
+        print(f"No valid {value_column} data after removing nulls/zeros")
+        return df_copy
+    
+    values = df_copy[value_column].values
+    
+    if method == 'robust':
+        # Use IQR method for outlier removal (more stable than percentiles)
+        Q1 = np.percentile(values, 25)
+        Q3 = np.percentile(values, 75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        
+        # Keep some outliers to maintain data integrity
+        lower_bound = max(lower_bound, np.percentile(values, 1))
+        upper_bound = min(upper_bound, np.percentile(values, 99))
+        
+    elif method == 'zscore':
+        # Z-score method
+        z_scores = np.abs(stats.zscore(values))
+        threshold = 3
+        mask = z_scores < threshold
+        df_copy = df_copy[mask]
+        values = df_copy[value_column].values
+        lower_bound = values.min()
+        upper_bound = values.max()
+    
+    # Apply bounds
+    df_copy = df_copy[(df_copy[value_column] >= lower_bound) & (df_copy[value_column] <= upper_bound)]
+    
+    if df_copy.empty:
+        print(f"No data left after outlier removal for {value_column}")
+        return df_copy
+    
+    # Use log transformation for better distribution
+    log_values = np.log1p(df_copy[value_column])
+    
+    # Robust normalization using percentiles instead of min-max
+    p5 = np.percentile(log_values, 5)
+    p95 = np.percentile(log_values, 95)
+    
+    if p95 > p5:
+        # Scale to 0-100 range, but cap extreme values
+        normalized = ((log_values - p5) / (p95 - p5)) * 100
+        normalized = np.clip(normalized, 0, 100)  # Ensure values stay in bounds
+    else:
+        normalized = np.full(len(df_copy), 50)
+    
+    df_copy[f'{value_column}_normalized'] = normalized
+    
+    # Also create a raw normalized version for comparison
+    raw_values = df_copy[value_column].values
+    raw_p5 = np.percentile(raw_values, 5)
+    raw_p95 = np.percentile(raw_values, 95)
+    
+    if raw_p95 > raw_p5:
+        raw_normalized = ((raw_values - raw_p5) / (raw_p95 - raw_p5)) * 100
+        raw_normalized = np.clip(raw_normalized, 0, 100)
+    else:
+        raw_normalized = np.full(len(df_copy), 50)
+    
+    df_copy[f'{value_column}_raw_normalized'] = raw_normalized
+    
+    print(f"{value_column} normalization complete: {len(df_copy)} points")
+    print(f"Value range: {df_copy[value_column].min():.2f} - {df_copy[value_column].max():.2f}")
+    print(f"Normalized range: {normalized.min():.2f} - {normalized.max():.2f}")
+    
+    return df_copy
+
+def aggregate_heatmap_points_adaptive(df, lat_col, lng_col, value_col, zoom_level=11):
+    """
+    Adaptive aggregation that adjusts precision based on zoom level and data density.
+    """
+    if df.empty:
+        return df
+    
+    df_copy = df.copy()
+    
+    # Adaptive precision based on zoom level
+    # Higher zoom = more precision, lower zoom = less precision
+    if zoom_level >= 16:
+        precision = 5  # Very fine
+    elif zoom_level >= 14:
+        precision = 4  # Fine
+    elif zoom_level >= 12:
+        precision = 3  # Medium
+    elif zoom_level >= 10:
+        precision = 2  # Coarse
+    else:
+        precision = 1  # Very coarse
+    
+    # Round coordinates
+    df_copy['lat_rounded'] = df_copy[lat_col].round(precision)
+    df_copy['lng_rounded'] = df_copy[lng_col].round(precision)
+    
+    # Aggregate with multiple statistics
+    aggregated = df_copy.groupby(['lat_rounded', 'lng_rounded']).agg({
+        value_col: ['sum', 'count', 'mean']
+    }).reset_index()
+    
+    # Flatten column names
+    aggregated.columns = ['lat', 'lng', 'value_sum', 'value_count', 'value_mean']
+    
+    # Use sum as primary value, but keep count for density weighting
+    aggregated['value'] = aggregated['value_sum']
+    aggregated['density_weight'] = np.log1p(aggregated['value_count'])  # Log scale for better distribution
+    
+    # Apply density weighting to reduce noise in sparse areas
+    aggregated['weighted_value'] = aggregated['value'] * (1 + aggregated['density_weight'] * 0.1)
+    
+    return aggregated[['lat', 'lng', 'weighted_value']].rename(columns={'weighted_value': 'value'})
+
+def aggregate_user_heatmap_points_improved(df, lat_col, lng_col, user_col, zoom_level=11):
+    """
+    Improved user aggregation with better handling of unique users.
+    """
+    if df.empty:
+        return df
+    
+    df_copy = df.copy()
+    
+    # Adaptive precision
+    if zoom_level >= 16:
+        precision = 5
+    elif zoom_level >= 14:
+        precision = 4
+    elif zoom_level >= 12:
+        precision = 3
+    else:
+        precision = 2
+    
+    df_copy['lat_rounded'] = df_copy[lat_col].round(precision)
+    df_copy['lng_rounded'] = df_copy[lng_col].round(precision)
+    
+    # Count unique users per location
+    aggregated = df_copy.groupby(['lat_rounded', 'lng_rounded'])[user_col].nunique().reset_index()
+    aggregated.columns = ['lat', 'lng', 'unique_users']
+    
+    # Apply log transformation for better distribution
+    aggregated['value'] = np.log1p(aggregated['unique_users']) * 10  # Scale up for visibility
+    
+    return aggregated[['lat', 'lng', 'value']]
+
+def generate_improved_heatmap_data(heatmap_type_req, df_orders_filtered, zoom_level=11):
+    """
+    Generate heatmap data using improved aggregation and normalization.
+    """
+    heatmap_data = []
+    
+    if heatmap_type_req not in ["order_density", "order_density_organic", "order_density_non_organic", "user_density"]:
+        return heatmap_data
+    
+    df_hm_source = df_orders_filtered.dropna(subset=['customer_latitude', 'customer_longitude'])
+    if df_hm_source.empty:
+        return heatmap_data
+    
+    if heatmap_type_req == "order_density":
+        df_hm_source['order_count'] = 1
+        df_aggregated = aggregate_heatmap_points_adaptive(
+            df_hm_source, 'customer_latitude', 'customer_longitude', 'order_count', zoom_level
+        )
+    elif heatmap_type_req == "order_density_organic":
+        if 'organic' in df_hm_source.columns:
+            df_organic = df_hm_source[df_hm_source['organic'] == 1]
+            if not df_organic.empty:
+                df_aggregated = aggregate_heatmap_points_adaptive(
+                    df_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', zoom_level
+                )
+            else:
+                df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+        else:
+            df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+    elif heatmap_type_req == "order_density_non_organic":
+        if 'organic' in df_hm_source.columns:
+            df_non_organic = df_hm_source[df_hm_source['organic'] == 0]
+            if not df_non_organic.empty:
+                df_aggregated = aggregate_heatmap_points_adaptive(
+                    df_non_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', zoom_level
+                )
+            else:
+                df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+        else:
+            df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+    elif heatmap_type_req == "user_density":
+        if 'user_id' in df_hm_source.columns:
+            df_aggregated = aggregate_user_heatmap_points_improved(
+                df_hm_source, 'customer_latitude', 'customer_longitude', 'user_id', zoom_level
+            )
+        else:
+            df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+    
+    # Apply improved normalization
+    if not df_aggregated.empty:
+        df_normalized = remove_outliers_and_normalize_improved(df_aggregated, 'value', method='robust')
+        if not df_normalized.empty:
+            # Use the normalized values
+            df_normalized['value'] = df_normalized['value_normalized']
+            heatmap_data = df_normalized[['lat', 'lng', 'value']].to_dict(orient='records')
+    
+    return heatmap_data
+
+def generate_basic_heatmap_fallback(heatmap_type_req, df_orders_filtered):
+    """
+    Fallback method using the original heatmap generation logic.
+    """
+    try:
+        df_hm_source = df_orders_filtered.dropna(subset=['customer_latitude', 'customer_longitude'])
+        if df_hm_source.empty:
+            return []
+        
+        if heatmap_type_req == "order_density":
+            df_hm_source['order_count'] = 1
+            df_aggregated = aggregate_heatmap_points(df_hm_source, 'customer_latitude', 'customer_longitude', 'order_count', precision=4)
+        elif heatmap_type_req == "order_density_organic":
+            if 'organic' in df_hm_source.columns:
+                df_organic = df_hm_source[df_hm_source['organic'] == 1]
+                df_aggregated = aggregate_heatmap_points(df_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', precision=4) if not df_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
+            else: 
+                df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+        elif heatmap_type_req == "order_density_non_organic":
+            if 'organic' in df_hm_source.columns:
+                df_non_organic = df_hm_source[df_hm_source['organic'] == 0]
+                df_aggregated = aggregate_heatmap_points(df_non_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', precision=4) if not df_non_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
+            else: 
+                df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
+        elif heatmap_type_req == "user_density":
+            df_aggregated = aggregate_user_heatmap_points(df_hm_source, 'customer_latitude', 'customer_longitude', 'user_id', precision=4) if 'user_id' in df_hm_source.columns else pd.DataFrame(columns=['lat', 'lng', 'value'])
+        
+        if not df_aggregated.empty and heatmap_type_req != "user_density":
+            max_count = df_aggregated['value'].max()
+            min_count = df_aggregated['value'].min()
+            df_aggregated['value'] = ((df_aggregated['value'] - min_count) / (max_count - min_count)) * 100 if max_count > min_count else 50
+        
+        return df_aggregated.to_dict(orient='records')
+        
+    except Exception as e:
+        print(f"Error in fallback heatmap generation: {e}")
+        return []
+
+# LEGACY: Keep original functions for backward compatibility
 def remove_outliers_and_normalize(df, value_column, lower_percentile=5, upper_percentile=95):
     """
     Remove outliers using percentile method and normalize values to 0-100 range.
@@ -403,7 +641,6 @@ def load_data():
     global df_orders, df_vendors, gdf_marketing_areas, gdf_tehran_region, gdf_tehran_main_districts, df_coverage_targets, target_lookup_dict
     print("Loading data...")
     start_time = time.time()
-
     try:
         # Specify dtypes to reduce memory usage and speed up loading
         dtype_dict = {
@@ -425,11 +662,6 @@ def load_data():
         df_orders['created_at'] = pd.to_datetime(df_orders['created_at'], errors='coerce')
         df_orders['created_at'] = df_orders['created_at'].dt.tz_localize(None)
         df_orders['city_name'] = df_orders['city_id'].map(city_id_map).astype('category')
-        
-        # # Only add missing columns, don't override existing ones
-        # for col in ['customer_latitude', 'customer_longitude', 'order_id', 'user_id']:
-        #     if col not in df_orders.columns: 
-        #         df_orders[col] = np.nan
         
         if 'organic' not in df_orders.columns:
             # If organic column doesn't exist, create a random one for demo
@@ -510,31 +742,7 @@ def load_data():
         df_vendors = pd.DataFrame()
         if df_vendors is not None and 'grade' not in df_vendors.columns: 
             df_vendors['grade'] = pd.Categorical(['Ungraded'] * len(df_vendors))
-
-    # --- NEW: Load and process tehran_coverage.csv ---
-    coverage_target_file = os.path.join(SRC_DIR, 'targets', 'tehran_coverage.csv')
-    try:
-        df_temp_targets = pd.read_csv(coverage_target_file, encoding='utf-8')
-        # Standardize marketing area names by stripping whitespace
-        if 'marketing_area' in df_temp_targets.columns:
-            df_temp_targets['marketing_area'] = df_temp_targets['marketing_area'].str.strip()
-            # Melt the dataframe to a long format for easy lookup
-            df_coverage_targets = df_temp_targets.melt(
-                id_vars=['marketing_area'],
-                var_name='business_line',
-                value_name='target'
-            )
-            # Create a dictionary for fast lookups: {(marketing_area, business_line): target}
-            target_lookup_dict = df_coverage_targets.set_index(['marketing_area', 'business_line'])['target'].to_dict()
-            print(f"Tehran coverage targets loaded and processed for {len(df_coverage_targets)} area/BL combinations.")
-        else:
-            print("Warning: 'marketing_area' column not found in tehran_coverage.csv. Targets not loaded.")
-            df_coverage_targets = pd.DataFrame()
-
-    except Exception as e:
-        print(f"Error loading tehran_coverage.csv: {e}")
-        df_coverage_targets = pd.DataFrame()
-            
+    
     # 3. Polygon Data - Load in parallel if possible
     poly_start = time.time()
     marketing_areas_base = os.path.join(SRC_DIR, 'polygons', 'tapsifood_marketing_areas')
@@ -562,11 +770,12 @@ def load_data():
             if city_name_key == 'tehran':
                 tehran_area_name_to_id_map = gdf.set_index('name')['area_id'].to_dict()
                 print(f"DEBUG: Created Tehran area name-to-id map with {len(tehran_area_name_to_id_map)} entries.")
-
             print(f"Marketing areas for {city_name_key} loaded: {len(gdf_marketing_areas[city_name_key])} polygons")
         except Exception as e:
             print(f"Error loading marketing areas for {city_name_key} from {file_path}: {e}")
             gdf_marketing_areas[city_name_key] = gpd.GeoDataFrame()
+    
+    # --- NEW: Load and process tehran_coverage.csv ---
     coverage_target_file = os.path.join(SRC_DIR, 'targets', 'tehran_coverage.csv')
     try:
         df_temp_targets = pd.read_csv(coverage_target_file, encoding='utf-8')
@@ -583,7 +792,6 @@ def load_data():
                 print(f"--- Mismatched Names: {unmapped_areas['marketing_area'].unique().tolist()}")
             
             df_temp_targets.dropna(subset=['area_id'], inplace=True) # Drop targets that can't be mapped
-
             # Melt the dataframe to a long format
             df_coverage_targets = df_temp_targets.melt(
                 id_vars=['area_id', 'marketing_area'], # keep both for reference
@@ -598,11 +806,9 @@ def load_data():
             # Print a sample key-value pair for verification
             if target_lookup_dict:
                  print(f"--- Sample lookup entry: {next(iter(target_lookup_dict.items()))}")
-
         else:
             print("Warning: 'marketing_area' column not found in tehran_coverage.csv. Targets not loaded.")
             df_coverage_targets = pd.DataFrame()
-
     except Exception as e:
         print(f"Error loading tehran_coverage.csv: {e}")
         df_coverage_targets = pd.DataFrame()
@@ -762,7 +968,10 @@ def get_map_data():
         area_type_display = request.args.get('area_type_display', default="tapsifood_marketing_areas", type=str)
         selected_polygon_sub_types = [s.strip() for s in request.args.getlist('area_sub_type_filter') if s.strip()]
         
-        # New parameters for radius modifier
+        # NEW: Get zoom level for adaptive heatmap processing
+        zoom_level = request.args.get('zoom_level', default=11, type=float)
+        
+        # Radius modifier parameters
         radius_modifier = request.args.get('radius_modifier', default=1.0, type=float)
         radius_mode = request.args.get('radius_mode', default='percentage', type=str)
         radius_fixed = request.args.get('radius_fixed', default=3.0, type=float)
@@ -785,10 +994,8 @@ def get_map_data():
             # Apply radius modifier based on mode
             if 'radius' in df_v_filtered.columns and 'original_radius' in df_v_filtered.columns:
                 if radius_mode == 'fixed':
-                    # Set all radii to the fixed value
                     df_v_filtered['radius'] = radius_fixed
                 else:
-                    # Apply percentage modifier
                     df_v_filtered['radius'] = df_v_filtered['original_radius'] * radius_modifier
             
             # Only filter if columns exist
@@ -844,49 +1051,63 @@ def get_map_data():
         if end_date: df_orders_filtered = df_orders_filtered[df_orders_filtered['created_at'] <= end_date]
         if selected_business_lines: df_orders_filtered = df_orders_filtered[df_orders_filtered['business_line'].isin(selected_business_lines)]
         
-        # --- Heatmap generation ---
+        # --- IMPROVED Heatmap generation using new functions ---
         if heatmap_type_req in ["order_density", "order_density_organic", "order_density_non_organic", "user_density"]:
-            df_hm_source = df_orders_filtered.dropna(subset=['customer_latitude', 'customer_longitude'])
-            if not df_hm_source.empty:
-                if heatmap_type_req == "order_density":
-                    df_hm_source['order_count'] = 1
-                    df_aggregated = aggregate_heatmap_points(df_hm_source, 'customer_latitude', 'customer_longitude', 'order_count', precision=4)
-                elif heatmap_type_req == "order_density_organic":
-                    if 'organic' in df_hm_source.columns:
-                        df_organic = df_hm_source[df_hm_source['organic'] == 1]
-                        df_aggregated = aggregate_heatmap_points(df_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', precision=4) if not df_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
-                    else: df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
-                elif heatmap_type_req == "order_density_non_organic":
-                    if 'organic' in df_hm_source.columns:
-                        df_non_organic = df_hm_source[df_hm_source['organic'] == 0]
-                        df_aggregated = aggregate_heatmap_points(df_non_organic.assign(order_count=1), 'customer_latitude', 'customer_longitude', 'order_count', precision=4) if not df_non_organic.empty else pd.DataFrame(columns=['lat', 'lng', 'value'])
-                    else: df_aggregated = pd.DataFrame(columns=['lat', 'lng', 'value'])
-                elif heatmap_type_req == "user_density":
-                    df_aggregated = aggregate_user_heatmap_points(df_hm_source, 'customer_latitude', 'customer_longitude', 'user_id', precision=4) if 'user_id' in df_hm_source.columns else pd.DataFrame(columns=['lat', 'lng', 'value'])
+            print(f"Generating improved heatmap for type: {heatmap_type_req} at zoom level: {zoom_level}")
+            
+            try:
+                heatmap_data_result = generate_improved_heatmap_data(heatmap_type_req, df_orders_filtered, zoom_level)
                 
-                if not df_aggregated.empty and heatmap_type_req != "user_density":
-                    max_count = df_aggregated['value'].max()
-                    min_count = df_aggregated['value'].min()
-                    # Normalize values to a 0-1 range on the backend so the client
-                    # heatmap receives consistent weights. This avoids dramatic
-                    # visual jumps when adjusting radius or blur on the frontend.
-                    df_aggregated['value'] = (
-                        (df_aggregated['value'] - min_count) / (max_count - min_count)
-                    ) if max_count > min_count else 0.5
-                heatmap_data = df_aggregated.to_dict(orient='records')
+                if heatmap_data_result:
+                    # Add metadata for frontend optimization
+                    print(f"Generated {len(heatmap_data_result)} heatmap points")
+                    
+                    # Calculate some statistics for the frontend
+                    values = [point['value'] for point in heatmap_data_result if 'value' in point and point['value'] is not None]
+                    if values:
+                        heatmap_stats = {
+                            'count': len(values),
+                            'min': float(np.min(values)),
+                            'max': float(np.max(values)),
+                            'mean': float(np.mean(values)),
+                            'p75': float(np.percentile(values, 75)),
+                            'p90': float(np.percentile(values, 90)),
+                            'p95': float(np.percentile(values, 95))
+                        }
+                        print(f"Heatmap stats: {heatmap_stats}")
+                    
+                    heatmap_data = heatmap_data_result
+                else:
+                    print("No heatmap data generated")
+                    heatmap_data = []
+                    
+            except Exception as e:
+                print(f"Error generating improved heatmap: {e}")
+                # Fallback to basic method if improved method fails
+                heatmap_data = generate_basic_heatmap_fallback(heatmap_type_req, df_orders_filtered)
         
         elif heatmap_type_req == "population" and city_name == "tehran":
             print("Generating population heatmap...")
             gdf_pop_source = None
-            if area_type_display == "tehran_main_districts" and gdf_tehran_main_districts is not None: gdf_pop_source = gdf_tehran_main_districts
-            elif area_type_display == "tehran_region_districts" and gdf_tehran_region is not None: gdf_pop_source = gdf_tehran_region
-            elif area_type_display == "all_tehran_districts" and gdf_tehran_main_districts is not None: gdf_pop_source = gdf_tehran_main_districts
+            if area_type_display == "tehran_main_districts" and gdf_tehran_main_districts is not None: 
+                gdf_pop_source = gdf_tehran_main_districts
+            elif area_type_display == "tehran_region_districts" and gdf_tehran_region is not None: 
+                gdf_pop_source = gdf_tehran_region
+            elif area_type_display == "all_tehran_districts" and gdf_tehran_main_districts is not None: 
+                gdf_pop_source = gdf_tehran_main_districts
+                
             if gdf_pop_source is not None and 'Pop' in gdf_pop_source.columns:
                 if selected_polygon_sub_types:
                     name_cols_poly = ['Name', 'NAME_MAHAL']
                     actual_name_col = next((col for col in name_cols_poly if col in gdf_pop_source.columns), None)
-                    if actual_name_col: gdf_pop_source = gdf_pop_source[gdf_pop_source[actual_name_col].isin(selected_polygon_sub_types)]
-                point_density_divisor = 1000 
+                    if actual_name_col: 
+                        gdf_pop_source = gdf_pop_source[gdf_pop_source[actual_name_col].isin(selected_polygon_sub_types)]
+                
+                # Adjust point density based on zoom level for population heatmap
+                base_divisor = 1000
+                zoom_multiplier = max(0.1, min(2.0, (zoom_level / 11.0)))  # Scale with zoom
+                point_density_divisor = base_divisor / zoom_multiplier
+                
                 temp_points = []
                 for _, row in gdf_pop_source.iterrows():
                     population = pd.to_numeric(row['Pop'], errors='coerce')
@@ -894,9 +1115,11 @@ def get_map_data():
                         num_points = int(population / point_density_divisor)
                         if num_points > 0:
                             generated_points = generate_random_points_in_polygon(row['geometry'], num_points)
-                            for point in generated_points: temp_points.append({'lat': point.y, 'lng': point.x, 'value': 1})
+                            for point in generated_points: 
+                                temp_points.append({'lat': point.y, 'lng': point.x, 'value': 1})
+                
                 heatmap_data = temp_points
-                print(f"Generated {len(heatmap_data)} points for population heatmap.")
+                print(f"Generated {len(heatmap_data)} points for population heatmap at zoom {zoom_level}")
         
         # --- Coverage Grid Generation ---
         if area_type_display == "coverage_grid":
@@ -915,7 +1138,6 @@ def get_map_data():
                 coverage_grid_data = coverage_cache[cache_key]
             else:
                 grid_points = generate_coverage_grid(city_name)
-                # The corrected find_marketing_area_for_points is called inside calculate_coverage
                 point_area_info = find_marketing_area_for_points(grid_points, city_name)
                 coverage_results = calculate_coverage_for_grid_vectorized(grid_points, df_v_filtered, city_name)
                 
@@ -924,7 +1146,6 @@ def get_map_data():
                     len(selected_business_lines) == 1 and
                     target_lookup_dict
                 )
-
                 selected_bl_for_target = selected_business_lines[0] if use_target_based_logic else None
                 
                 print(f"DEBUG: Coverage logic check: Target-based = {use_target_based_logic}")
@@ -946,14 +1167,12 @@ def get_map_data():
                             
                             if i < 5:
                                print(f"--- Point {i}: area_id='{area_id}', bl='{selected_bl_for_target}'. Target lookup result: {target_value}")
-
                             if target_value is not None:
                                 actual_value = coverage['by_business_line'].get(selected_bl_for_target, 0)
                                 point_data['target_business_line'] = selected_bl_for_target
                                 point_data['target_value'] = target_value
                                 point_data['actual_value'] = actual_value
                                 point_data['performance_ratio'] = (actual_value / target_value) if target_value > 0 else 2.0
-
                         temp_coverage_grid_data.append(point_data)
                 
                 coverage_grid_data = temp_coverage_grid_data
@@ -998,22 +1217,15 @@ def get_map_data():
                             clean_gdf[col] = clean_gdf[col].astype(object).where(pd.notna(clean_gdf[col]), None)
                     polygons_geojson = clean_gdf.__geo_interface__
         
-        # If coverage grid is displayed, ALSO load the corresponding marketing polygons for the overlay feature.
-        # This allows the "Marketing Areas On Top" button to work.
+        # Marketing areas overlay for coverage grid
         if area_type_display == "coverage_grid" and city_name in gdf_marketing_areas:
-            # We don't need to enrich these with stats, just send the geometry and name for display.
             gdf_to_send = gdf_marketing_areas[city_name].copy()
-
-            # We should still allow filtering which polygons appear on top.
             if selected_polygon_sub_types and 'name' in gdf_to_send.columns:
                 gdf_to_send = gdf_to_send[gdf_to_send['name'].astype(str).isin(selected_polygon_sub_types)]
-
             if not gdf_to_send.empty:
-                # Use a simplified cleaning process for this basic data
                 clean_gdf = gdf_to_send.copy()
                 for col in clean_gdf.columns:
                     if col == 'geometry': continue
-                    # This ensures non-geometry columns are JSON-serializable
                     clean_gdf[col] = clean_gdf[col].astype(object).where(pd.notna(clean_gdf[col]), None)
                 polygons_geojson = clean_gdf.__geo_interface__
         
@@ -1021,9 +1233,14 @@ def get_map_data():
         print(f"Request processed in {request_time:.2f}s")
         
         response_data = {
-            "vendors": vendor_markers, "heatmap_data": heatmap_data, 
-            "polygons": polygons_geojson, "coverage_grid": coverage_grid_data,
-            "processing_time": request_time
+            "vendors": vendor_markers, 
+            "heatmap_data": heatmap_data, 
+            "polygons": polygons_geojson, 
+            "coverage_grid": coverage_grid_data,
+            "processing_time": request_time,
+            # NEW: Add metadata for frontend optimization
+            "zoom_level": zoom_level,
+            "heatmap_type": heatmap_type_req
         }
         
         try:
